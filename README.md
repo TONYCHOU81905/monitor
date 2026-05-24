@@ -69,6 +69,8 @@ chmod +x build_app.sh
 dist/Flutter DevTools.app
 ```
 
+App 圖示使用專案內 `assets/FlutterDevTools.icns`（深色 Performance 時間軸風格）。重新打包後，Launchpad / 應用程式資料夾會顯示新圖示。
+
 ### 安裝到本機
 
 1. 在 Finder 開啟專案內的 `dist` 資料夾  
@@ -255,6 +257,14 @@ id,pool,label
 
 腳本會安裝 `py2app`、`requests`、`rumps` 等，並在 `dist/` 產生 **`Flutter DevTools.app`**。
 
+若只更新圖示（已修改 `assets/icon_source.png`）：
+
+```bash
+chmod +x scripts/build_icon.sh
+./scripts/build_icon.sh
+./build_app.sh
+```
+
 手動打包：
 
 ```bash
@@ -290,6 +300,11 @@ monitor/
 ├── flutter_monitor.py   # 主程式
 ├── setup_app.py         # py2app 打包設定
 ├── build_app.sh         # 一鍵建置 .app
+├── assets/
+│   ├── icon_source.png      # 圖示原始檔（1024×1024）
+│   └── FlutterDevTools.icns # macOS App 圖示
+├── scripts/
+│   └── build_icon.sh    # 從 PNG 重新產生 .icns
 ├── README.md            # 本說明
 ├── build/               # 建置暫存（勿提交）
 └── dist/                # 產出的 .app（勿提交）

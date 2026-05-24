@@ -10,6 +10,9 @@ venv/
 build/
 dist/
 
+# icon build temp
+assets/icon.iconset/
+
 # macOS
 .DS_Store
 

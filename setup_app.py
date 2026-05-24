@@ -10,7 +10,7 @@ DATA_FILES = []
 
 OPTIONS = {
     "argv_emulation": False,
-    "iconfile": None,
+    "iconfile": "assets/FlutterDevTools.icns",
     "plist": {
         "CFBundleName": "Flutter DevTools",
         "CFBundleDisplayName": "Flutter DevTools",
