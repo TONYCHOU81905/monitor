@@ -411,7 +411,7 @@ class DesktopPanel:
 
 class FlutterMonitorApp(rumps.App):
     def __init__(self):
-        super().__init__(APP_NAME, title="Perf: …", quit_button="Quit DevTools")
+        super().__init__(APP_NAME, title="Perf: …", quit_button=None)
         self.config = load_config()
         self.latest_views = []
         self.last_error = None
@@ -437,6 +437,7 @@ class FlutterMonitorApp(rumps.App):
             rumps.MenuItem("Reveal trace config", callback=self.show_config_path),
             rumps.MenuItem("Open config in Finder", callback=self.open_config_in_finder),
             None,
+            rumps.MenuItem("結束程式", callback=self.quit_app),
             rumps.MenuItem("About DevTools", callback=self.about),
         ]
 
@@ -526,6 +527,8 @@ class FlutterMonitorApp(rumps.App):
         self.menu.add(None)
         self.menu.add(rumps.MenuItem("Reveal trace config", callback=self.show_config_path))
         self.menu.add(rumps.MenuItem("Open config in Finder", callback=self.open_config_in_finder))
+        self.menu.add(None)
+        self.menu.add(rumps.MenuItem("結束程式", callback=self.quit_app))
         self.menu.add(rumps.MenuItem("About DevTools", callback=self.about))
 
         if self.config.get("show_desktop_window"):
@@ -694,6 +697,9 @@ class FlutterMonitorApp(rumps.App):
 
     def open_config_in_finder(self, _):
         subprocess.run(["open", "-R", str(CONFIG_PATH)], check=False)
+
+    def quit_app(self, _):
+        rumps.quit_application()
 
     def about(self, _):
         rumps.alert(

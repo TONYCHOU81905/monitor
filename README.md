@@ -82,7 +82,7 @@ App 圖示使用專案內 `assets/FlutterDevTools.icns`（深色 Performance 時
 
 ### 結束程式
 
-- 選單列圖示 → **Quit DevTools**  
+- 選單列圖示 → **結束程式**（在 **About DevTools** 正上方）  
 - 或在「活動監視器」結束 `Flutter DevTools`
 
 ---
@@ -224,8 +224,8 @@ id,pool,label
 | **Panel always on top** | 面板是否永遠置頂 |
 | **Reveal trace config** | 顯示設定檔路徑 |
 | **Open config in Finder** | 在 Finder 中顯示設定檔 |
+| **結束程式** | 完全結束 App（在 About 上方，不需拉到選單最底） |
 | **About DevTools** | 關於 |
-| **Quit DevTools** | 結束程式 |
 
 ### 桌面 Performance 面板
 
