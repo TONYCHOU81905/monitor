@@ -6,10 +6,18 @@ import json
 import subprocess
 import threading
 import time
+import warnings
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 
 import objc
+warnings.filterwarnings(
+    "ignore",
+    message=r"Unable to find acceptable character detection dependency.*",
+    module=r"requests(\\..*)?",
+)
+
 import requests
 import rumps
 from AppKit import (
@@ -43,7 +51,13 @@ API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
+
+_SESSION = requests.Session()
+# 避免受系統 Proxy / 環境變數影響造成延遲或卡住，確保拿到即時報價。
+_SESSION.trust_env = False
 
 # DevTools Performance 色系
 C_BG = (0.11, 0.11, 0.12)
@@ -135,67 +149,71 @@ def fetch_targets(targets):
         "delay": "0",
         "_": int(time.time() * 1000),
     }
-    response = requests.get(API_URL, params=params, headers=HEADERS, timeout=8)
+    response = _SESSION.get(API_URL, params=params, headers=HEADERS, timeout=8)
     response.raise_for_status()
     return response.json().get("msgArray", [])
 
 
 def quote_to_perf_view(q, alias_map):
-    """將資料轉成 Performance 時間軸用的顯示欄位。"""
+    """將資料轉成面板顯示欄位。"""
     code = q.get("c", "")
     alias = alias_map.get(code, q.get("n", code) or code)
     trace = alias if "::" in alias else f"{alias}::build()"
 
     price = safe_float(q.get("z"))
     yesterday = safe_float(q.get("y"))
+    high = safe_float(q.get("h"))
+    low = safe_float(q.get("l"))
     vol = safe_float(q.get("v")) or 0
 
-    if price is not None:
-        frame_ms = price / 100.0
-        build_ms = frame_ms * 0.41
-        raster_ms = frame_ms * 0.17
-        ui_ms = frame_ms * 0.28
-    else:
-        frame_ms = build_ms = raster_ms = ui_ms = None
-
-    delta_pct = 0.0
+    change = None
+    change_pct = None
     if price is not None and yesterday is not None and yesterday != 0:
-        delta_ms = (price - yesterday) / 100.0
-        delta_pct = (price - yesterday) / yesterday * 100
-        if delta_ms > 0:
-            delta_short = f"▲ +{delta_ms:.2f}ms jank"
-            delta_color = "bad"
-        elif delta_ms < 0:
-            delta_short = f"▼ {delta_ms:.2f}ms"
-            delta_color = "good"
-        else:
-            delta_short = "→ stable"
-            delta_color = "neutral"
-        shader_delta = f"shader Δ {delta_pct:+.2f}%"
+        change = price - yesterday
+        change_pct = (price - yesterday) / yesterday * 100
     else:
-        delta_short = "no sample"
-        delta_color = "neutral"
-        shader_delta = "shader Δ —"
-        delta_ms = 0
+        change = None
+        change_pct = None
 
     sample_tick = q.get("t", "—")
-    rebuilds = int(vol // 1000) if vol else 0
-    gpu_load = min(100, max(4, int(abs(delta_pct) * 6))) if price and yesterday else 8
+    vol_k = int(vol // 1000) if vol else 0
+
+    def _fmt(v):
+        return f"{v:.2f}" if v is not None else "—"
+
+    def _fmt_signed(v):
+        if v is None:
+            return "—"
+        sign = "+" if v > 0 else ""
+        return f"{sign}{v:.2f}"
+
+    if change is None:
+        delta_color = "neutral"
+    elif change > 0:
+        delta_color = "good"
+    elif change < 0:
+        delta_color = "bad"
+    else:
+        delta_color = "neutral"
 
     return {
         "code": code,
         "alias": alias,
         "trace_name": trace,
-        "frame_ms": f"{frame_ms:.2f}" if frame_ms is not None else "—",
-        "build_ms": f"{build_ms:.2f}" if build_ms is not None else "—",
-        "raster_ms": f"{raster_ms:.2f}" if raster_ms is not None else "—",
-        "ui_ms": f"{ui_ms:.2f}" if ui_ms is not None else "—",
-        "delta_short": delta_short,
+        "price": price,
+        "yesterday": yesterday,
+        "high": high,
+        "low": low,
+        "price_s": _fmt(price),
+        "high_s": _fmt(high),
+        "low_s": _fmt(low),
+        "change": change,
+        "change_pct": change_pct,
+        "change_s": _fmt_signed(change),
+        "change_pct_s": f"{change_pct:+.2f}%" if change_pct is not None else "—",
         "delta_color": delta_color,
-        "shader_delta": shader_delta,
         "sample_tick": sample_tick,
-        "rebuilds": str(rebuilds),
-        "gpu_load": gpu_load,
+        "vol_k": str(vol_k),
         "isolate": code,
         "pool": q.get("ch", "main"),
     }
@@ -203,20 +221,21 @@ def quote_to_perf_view(q, alias_map):
 
 def menu_line(view):
     return (
-        f"{view['trace_name'][:26]:26}  "
-        f"{view['frame_ms']} ms  "
-        f"{view['delta_short']}  "
+        f"{view['trace_name'][:22]:22}  "
+        f"{view['price_s']:>7}  "
+        f"{view['change_s']:>7}  "
+        f"{view['change_pct_s']:>8}  "
         f"@{view['sample_tick']}"
     )
 
 
 def bar_title(views, ok_count, total):
     if not views:
-        return "Perf: idle"
+        return "Flutter Monitor: idle"
     if len(views) == 1:
         v = views[0]
-        return f"Perf: {v['frame_ms']}ms"
-    return f"Perf: {ok_count}/{total} traces"
+        return f"Trace {v['code']} {v['price_s']} ({v['change_pct_s']})"
+    return f"Flutter Monitor: {ok_count}/{total}"
 
 
 class _DesktopWindowDelegate(NSObject):
@@ -327,11 +346,27 @@ class DesktopPanel:
         filled = int(width * pct / 100)
         return "█" * filled + "░" * (width - filled)
 
+    def _sparkline(self, values, width=18):
+        if not values:
+            return " " * width
+        blocks = "▁▂▃▄▅▆▇█"
+        xs = list(values)[-width:]
+        lo = min(xs)
+        hi = max(xs)
+        if hi == lo:
+            return (blocks[0] * len(xs)).rjust(width)
+        out = []
+        for v in xs:
+            t = (v - lo) / (hi - lo)
+            idx = int(t * (len(blocks) - 1))
+            out.append(blocks[idx])
+        return ("".join(out)).rjust(width)
+
     def build_attributed(self):
         app = self.app
         parts = []
 
-        header = "  Performance"
+        header = "  Flutter Monitor"
         parts.append(self._attr(header + "\n", _rgb(C_ACCENT), bold=True, size=13))
 
         if app.last_error:
@@ -339,43 +374,67 @@ class DesktopPanel:
             parts.append(self._attr(sub, _rgb(C_BAD)))
             parts.append(self._attr(f"  {app.last_error[:120]}\n\n", _rgb(C_DIM)))
         else:
-            sub = f"  ● Recording  ·  {app.last_update or '—'}  ·  60 FPS budget 16.67ms\n"
+            sub = f"  ● Monitoring  ·  {app.last_update or '—'}  ·  sampling interval {app.config.get('interval_seconds', '—')}s\n"
             parts.append(self._attr(sub, _rgb(C_GOOD)))
 
-        parts.append(self._attr("  " + "─" * 52 + "\n", _rgb(C_PANEL)))
+        parts.append(self._attr("  " + "─" * 92 + "\n", _rgb(C_PANEL)))
         parts.append(self._attr(
-            f"  {'Frame':<28} {'UI':>7} {'Build':>7} {'Raster':>7}  GPU\n",
+            f"  {'Trace':<26} {'Trend':>18} {'Last':>8} {'High':>8} {'Low':>8} {'Δ':>8} {'Δ%':>8} {'VolK':>6}\n",
             _rgb(C_DIM),
             size=11,
         ))
-        parts.append(self._attr("  " + "─" * 52 + "\n", _rgb(C_PANEL)))
+        parts.append(self._attr("  " + "─" * 92 + "\n", _rgb(C_PANEL)))
 
         if not app.latest_views:
             parts.append(self._attr("  No pinned traces — use menu to pin widgets\n", _rgb(C_DIM)))
         else:
-            for view in app.latest_views:
+            # 依變動幅度排序：變化最大的最上面，最好觀察
+            views = sorted(
+                app.latest_views,
+                key=lambda v: (v.get("change_pct") is None, -(abs(v.get("change_pct") or 0.0))),
+            )
+            for idx, view in enumerate(views):
                 color = {
                     "good": _rgb(C_GOOD),
                     "bad": _rgb(C_BAD),
                     "neutral": _rgb(C_TEXT),
                 }[view["delta_color"]]
 
-                row = (
-                    f"  {view['trace_name'][:28]:<28} "
-                    f"{view['ui_ms']:>6} "
-                    f"{view['build_ms']:>6} "
-                    f"{view['raster_ms']:>6}  "
-                )
-                parts.append(self._attr(row, _rgb(C_TEXT), size=11))
-                bar = self._bar(view["gpu_load"])
-                parts.append(self._attr(f"{bar}\n", _rgb(C_ACCENT), size=10))
+                name_color = _rgb(C_TEXT)
+                trend = self._sparkline(app.history.get(view["code"], ()))
 
-                parts.append(self._attr(
-                    f"      {view['frame_ms']} ms total  ·  {view['delta_short']}  ·  "
-                    f"{view['shader_delta']}  ·  rebuilds {view['rebuilds']}\n",
-                    color,
-                    size=11,
-                ))
+                row = (
+                    f"  {view['trace_name'][:26]:<26} "
+                    f"{trend} "
+                    f"{view['price_s']:>8} "
+                    f"{view['high_s']:>8} "
+                    f"{view['low_s']:>8} "
+                    f"{view['change_s']:>8} "
+                    f"{view['change_pct_s']:>8} "
+                    f"{view['vol_k']:>6}\n"
+                )
+                if idx % 2 == 1:
+                    parts.append(
+                        NSAttributedString.alloc().initWithString_attributes_(
+                            row,
+                            {
+                                "NSColor": name_color,
+                                "NSFont": NSFont.monospacedSystemFontOfSize_weight_(11, 0),
+                                "NSBackgroundColor": _rgb(C_PANEL),
+                            },
+                        )
+                    )
+                else:
+                    parts.append(self._attr(row, name_color, size=11))
+
+                # 第二行：用顏色突出漲跌，並顯示 tick/pool 方便排查資料來源
+                parts.append(self._attr(f"      tick {view['sample_tick']}  ·  pool {view['pool']}\n", _rgb(C_DIM), size=10))
+                parts.append(self._attr("      " + ("─" * 86) + "\n", _rgb(C_PANEL), size=10))
+
+                # 將變動顏色套用在下一列的主要數字上（肉眼掃描更快）
+                # 這裡用一行短提示來避免整行都太花。
+                parts.append(self._attr(f"      delta {view['change_s']} ({view['change_pct_s']})\n", color, size=10))
+
                 if not app.config.get("compact_mode", True):
                     parts.append(self._attr(
                         f"      isolate {view['isolate']}  ·  pool {view['pool']}  ·  tick {view['sample_tick']}\n",
@@ -383,7 +442,7 @@ class DesktopPanel:
                         size=10,
                     ))
 
-        parts.append(self._attr("\n  Timeline · CPU profiler · Memory (tabs)\n", _rgb(C_DIM), size=10))
+        parts.append(self._attr("\n  Tips: sorted by delta · green up · red down · use menu to pin/unpin traces\n", _rgb(C_DIM), size=10))
         return parts
 
     def update_content(self):
@@ -417,29 +476,33 @@ class FlutterMonitorApp(rumps.App):
         self.last_error = None
         self.last_update = None
         self.is_refreshing = False
+        self.history = defaultdict(lambda: deque(maxlen=18))
         self.desktop_panel = DesktopPanel(self)
         self._build_initial_menu()
         self.timer = rumps.Timer(self.on_timer, self.config["interval_seconds"])
         self.timer.start()
         self.refresh_async()
 
+    def _noop(self, _=None):
+        return None
+
+    def _label_item(self, text):
+        return rumps.MenuItem(text, callback=self._noop)
+
     def _build_initial_menu(self):
-        self.menu = [
-            rumps.MenuItem("Profiling: starting…", callback=None),
-            None,
-            rumps.MenuItem("Capture timeline", callback=self.refresh_now),
-            rumps.MenuItem("Pin widget trace…", callback=self.add_target),
-            rumps.MenuItem("Unpin trace…", callback=self.remove_target),
-            rumps.MenuItem("Rename trace label…", callback=self.rename_target),
-            rumps.MenuItem("Sampling interval…", callback=self.set_interval),
-            None,
-            rumps.MenuItem("Show Performance panel", callback=self.toggle_desktop_window),
-            rumps.MenuItem("Reveal trace config", callback=self.show_config_path),
-            rumps.MenuItem("Open config in Finder", callback=self.open_config_in_finder),
-            None,
-            rumps.MenuItem("結束程式", callback=self.quit_app),
-            rumps.MenuItem("About DevTools", callback=self.about),
-        ]
+        # 避免走 rumps 的 list→menu 解析路徑（在某些 py2app/Python 組合會觸發 abort），改用逐項 add。
+        self.menu.clear()
+        self.menu.add(self._label_item("Profiling: starting…"))
+        self.menu.add(rumps.MenuItem("Capture timeline", callback=self.refresh_now))
+        self.menu.add(rumps.MenuItem("Pin widget trace…", callback=self.add_target))
+        self.menu.add(rumps.MenuItem("Unpin trace…", callback=self.remove_target))
+        self.menu.add(rumps.MenuItem("Rename trace label…", callback=self.rename_target))
+        self.menu.add(rumps.MenuItem("Sampling interval…", callback=self.set_interval))
+        self.menu.add(rumps.MenuItem("Show Performance panel", callback=self.toggle_desktop_window))
+        self.menu.add(rumps.MenuItem("Reveal trace config", callback=self.show_config_path))
+        self.menu.add(rumps.MenuItem("Open config in Finder", callback=self.open_config_in_finder))
+        self.menu.add(rumps.MenuItem("結束程式", callback=self.quit_app))
+        self.menu.add(rumps.MenuItem("About DevTools", callback=self.about))
 
     def on_timer(self, _):
         self.refresh_async()
@@ -462,6 +525,9 @@ class FlutterMonitorApp(rumps.App):
             }
             quotes = fetch_targets(targets)
             self.latest_views = [quote_to_perf_view(q, alias_map) for q in quotes]
+            for v in self.latest_views:
+                if v.get("frame_ms_num") is not None:
+                    self.history[v["code"]].append(float(v["frame_ms_num"]))
             self.last_error = None
             self.last_update = datetime.now().strftime("%H:%M:%S")
         except Exception as e:
@@ -478,30 +544,28 @@ class FlutterMonitorApp(rumps.App):
 
         if self.last_error:
             self.title = "Perf: ERR"
-            self.menu.add(rumps.MenuItem(f"Trace error · {self.last_update or '—'}", callback=None))
-            self.menu.add(rumps.MenuItem(self.last_error[:72], callback=None))
+            self.menu.add(self._label_item(f"Trace error · {self.last_update or '—'}"))
+            self.menu.add(self._label_item(self.last_error[:72]))
         else:
             if self.config.get("show_price_in_bar") and self.latest_views:
                 self.title = bar_title(self.latest_views, ok, total)
             else:
                 self.title = bar_title(self.latest_views, ok, total) if self.latest_views else "Perf: idle"
-            self.menu.add(rumps.MenuItem(f"Recording · {self.last_update or '—'} · {ok}/{total} traces", callback=None))
-
-        self.menu.add(None)
+            self.menu.add(self._label_item(f"Recording · {self.last_update or '—'} · {ok}/{total} traces"))
 
         if not self.latest_views:
-            self.menu.add(rumps.MenuItem("No pinned traces", callback=None))
+            self.menu.add(self._label_item("No pinned traces"))
         else:
             for view in self.latest_views:
-                self.menu.add(rumps.MenuItem(menu_line(view), callback=None))
+                self.menu.add(self._label_item(menu_line(view)))
                 if not self.config.get("compact_mode", True):
-                    self.menu.add(rumps.MenuItem(
-                        f"  ui {view['ui_ms']} · build {view['build_ms']} · raster {view['raster_ms']} · "
-                        f"rebuilds {view['rebuilds']} · {view['shader_delta']}",
-                        callback=None,
-                    ))
+                    self.menu.add(
+                        self._label_item(
+                            f"  ui {view['ui_ms']} · build {view['build_ms']} · raster {view['raster_ms']} · "
+                            f"rebuilds {view['rebuilds']} · {view['shader_delta']}"
+                        )
+                    )
 
-        self.menu.add(None)
         self.menu.add(rumps.MenuItem("Capture timeline", callback=self.refresh_now))
         self.menu.add(rumps.MenuItem("Pin widget trace…", callback=self.add_target))
         self.menu.add(rumps.MenuItem("Unpin trace…", callback=self.remove_target))
@@ -524,10 +588,8 @@ class FlutterMonitorApp(rumps.App):
         on_top.state = bool(self.config.get("desktop_always_on_top", True))
         self.menu.add(on_top)
 
-        self.menu.add(None)
         self.menu.add(rumps.MenuItem("Reveal trace config", callback=self.show_config_path))
         self.menu.add(rumps.MenuItem("Open config in Finder", callback=self.open_config_in_finder))
-        self.menu.add(None)
         self.menu.add(rumps.MenuItem("結束程式", callback=self.quit_app))
         self.menu.add(rumps.MenuItem("About DevTools", callback=self.about))
 

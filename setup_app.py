@@ -21,8 +21,8 @@ OPTIONS = {
         "LSUIElement": True,
         "NSHighResolutionCapable": True,
     },
-    "packages": ["rumps", "requests", "objc"],
-    "includes": ["AppKit", "Foundation", "PyObjCTools"],
+    "packages": ["rumps", "requests", "objc", "charset_normalizer"],
+    "includes": ["AppKit", "Foundation", "PyObjCTools", "charset_normalizer"],
 }
 
 setup(
